@@ -62,6 +62,7 @@ export supconverged,
        block,
        steadystate!,
        jacobian,
+       jacobian_full,
        transition!,
 
        AbstractHetAgent,

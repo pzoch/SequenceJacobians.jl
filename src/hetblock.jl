@@ -66,16 +66,16 @@ end
 
 function backward!(::Nothing, b::HetBlock, invals::Tuple)
     verbose, pgap = _verbose(get(b.ssargs, :verbose, false))
-    maxbackiter = get(b.ssargs, :maxbackiter, 5000)
-    backtol = get(b.ssargs, :backtol, 1e-8)
+    maxbackiter = get(b.ssargs, :maxbackiter, 7500)
+    backtol = get(b.ssargs, :backtol, 1e-7)
     return _backward!(b.ha, invals, maxbackiter, backtol, verbose, pgap)
 end
 
 function forward!(::Nothing, b::HetBlock, invals::Tuple)
     initendo!(b.ha)
     verbose, pgap = _verbose(get(b.ssargs, :verbose, false))
-    maxforiter = get(b.ssargs, :maxforiter, 5000)
-    fortol = get(b.ssargs, :fortol, 1e-10)
+    maxforiter = get(b.ssargs, :maxforiter, 7500)
+    fortol = get(b.ssargs, :fortol, 1e-8)
     return _forward!(b.ha, invals, maxforiter, fortol, verbose, pgap)
 end
 

@@ -68,10 +68,18 @@ the exogenous law of motion `ps`.
     @tullio ev[i,j,k] = v[i,j,l] * p.m[k,l]
 end
 
+# @inline function backward!(ev::AbstractArray{T,3}, v::AbstractArray{T,3}, p1::ExogProc,
+#         p2::ExogProc) where T
+#     @tullio ev[i,j,k] = v[i,l,m] * p1.m[j,l] * p2.m[k,m]
+# end
+
+# this is with death, death does not matter here for any calculation so ignore it
 @inline function backward!(ev::AbstractArray{T,3}, v::AbstractArray{T,3}, p1::ExogProc,
-        p2::ExogProc) where T
-    @tullio ev[i,j,k] = v[i,l,m] * p1.m[j,l] * p2.m[k,m]
+    p2::ExogProc) where T
+@tullio ev[i,j,k] = v[i,j,l] * p1.m[k,l]
 end
+
+
 
 @inline function backward!(ev::AbstractArray{T,4}, v::AbstractArray{T,4}, p::ExogProc) where T
     @tullio ev[i,j,k,l] = v[i,j,k,m] * p.m[l,m]
@@ -100,10 +108,29 @@ Results are saved in `out`.
     @tullio out[i,j,k] = D[i,j,l] * p.m[l,k]
 end
 
+# # with death/survival
+# @inline function forward!(out::AbstractArray{T,3}, D::AbstractArray{T,3}, p::ExogProc, surv::Float64) where T
+#     @tullio out[i,j,k] =  D[i,j,l] * p.m[l,k]
+#     println("using B")
+#     out[:,:,:] = surv * out[:,:,:]
+#     out[1,1,:] = out[1,1,:] + (1 - surv) * p.d[:]
+# end
+
+#########
+# this one with death/survival
 @inline function forward!(out::AbstractArray{T,3}, D::AbstractArray{T,3}, p1::ExogProc,
         p2::ExogProc) where T
-    @tullio out[i,j,k] = D[i,l,m] * p1.m[l,j] * p2.m[m,k]
+    @tullio out[i,j,k] = D[i,j,l] * p1.m[l,k]
+    out[:,:,:] = p2.m[1,1] * out[:,:,:]
+    out[1,1,:] = out[1,1,:] + (1 - p2.m[1,1] ) * p1.d[:]
 end
+#########
+# @inline function forward!(out::AbstractArray{T,3}, D::AbstractArray{T,3}, p1::ExogProc,
+#     p2::ExogProc) where T
+#     println("using C")
+# @tullio out[i,j,k] = D[i,l,m] * p1.m[l,j] * p2.m[m,k]
+
+#end
 
 @inline function forward!(out::AbstractArray{T,4}, D::AbstractArray{T,4}, p::ExogProc) where T
     @tullio out[i,j,k,l] = D[i,j,k,m] * p.m[m,l]

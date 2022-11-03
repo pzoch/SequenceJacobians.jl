@@ -110,6 +110,63 @@ function jacobian(b::SimpleBlock, ::Val{i}, nT::Int, varvals::NamedTuple,
     end
 end
 
+# piotr's code - this gives full jacobian of a simple block
+function jacobian_full(b::SimpleBlock, sources, targets, nT::Int, varvals::NamedTuple,  excluded=nothing,
+        TF::Type=Float64) 
+    sources isa Symbol && (sources = (sources,))
+    targets isa Symbol && (targets = (targets,))
+    excluded isa BlockOrVar && (excluded = (excluded,))
+    isempty(sources) && throw(ArgumentError("sources cannot be empty"))
+    isempty(targets) && throw(ArgumentError("targets cannot be empty"))
+    sources = Set{Symbol}(sources)
+    # The order of the targets need to be maintained
+    targets = collect(Symbol, targets)
+    any(v->v in sources, targets) && throw(ArgumentError("sources and targets cannot overlap"))
+    excluded === nothing || (excluded = Set{BlockOrVar}(excluded))
+        blk = b
+        pushed = false
+        byinput = jacbyinput(blk)
+        byinput || (J = jacobian(blk, nT, varvals))
+        # Compute direct Jacobians for each input-output pair
+    for (i, vi) in enumerate(inputs(blk))
+        # Only need variables that are reachable from sources
+        if vi in vars
+            byinput && (J = jacobian(blk, Val(i), nT, varvals))
+            r0next = 0
+            for (r, vo) in enumerate(outputs(blk))
+                # Input/output variable could be an array
+                Ni = length(varvals[vi])
+                No = outlength(blk, r)
+                # Make sure r0 is updated even if the iteration is skipped
+                r0 = r0next
+                r0next += No
+                excluded !== nothing && vo in excluded && continue
+                jo = get!(DMat, parts, vo)
+                mj = get(jo, vi, nothing)
+                for ii in 1:Ni
+                    for rr in 1:No
+                        j, isz = getjacmap(blk, J, i, ii, r, r0+rr, nT)
+                        isz && continue
+                        # Create the array mj only when nonzero map is encountered
+                        if mj === nothing
+                            mj = Matrix{LinearMap{TF}}(undef, No, Ni)
+                            fill!(mj, zmap)
+                            jo[vi] = mj
+                        end
+                        # j0 might be nonzero if multiple temporal inputs exist
+                        j0 = mj[rr,ii]
+                        # Replace zmap so that it is not accumulated
+                        mj[rr,ii] = j0 === zmap ? j : j0+j
+                    end
+                end
+
+            end
+        end
+    end
+    return jacobian_full(blk, vars, varvals, nT, sources, targets, excluded, parts)
+end
+
+
 function getjacmap(b::SimpleBlock{Nothing}, J::Matrix,
         i::Int, ii::Int, r::Int, rr::Int, nT::Int)
     j = J[rr,ii]
