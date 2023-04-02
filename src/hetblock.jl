@@ -97,6 +97,7 @@ function steadystate!(b::HetBlock, varvals::NamedTuple)
     return merge(varvals, NamedTuple{outputs(b)}(vals))
 end
 
+#=
 struct HetAgentJacCache{HA<:AbstractHetAgent, FX<:Tuple, DC, TF<:AbstractFloat, M, N}
     ha::HA
     hass::HA
@@ -104,6 +105,23 @@ struct HetAgentJacCache{HA<:AbstractHetAgent, FX<:Tuple, DC, TF<:AbstractFloat, 
     epsilon::TF
     fxs::FX
     df::Array{TF,M}
+    dcache::DC
+    dEVs::Vector{Array{TF,N}}
+    dYs::Dict{Int,Matrix{TF}}
+    dDs::Dict{Int,Array{TF,M}}
+    Es::Dict{Int,Array{TF,M}}
+    Js::Dict{Int,Dict{Int,Matrix{TF}}}
+end
+=#
+
+struct HetAgentJacCache{HA<:AbstractHetAgent, FX<:Tuple, DC, TF<:AbstractFloat, M, N, O}
+    ha::HA
+    hass::HA
+    nT::Int
+    epsilon::TF
+    fxs::FX
+    df::Array{TF,M}
+    df_big::Dict{Int,Array{TF,O}}
     dcache::DC
     dEVs::Vector{Array{TF,N}}
     dYs::Dict{Int,Matrix{TF}}
@@ -123,7 +141,7 @@ function _expectation_vector!(E, Etemp, nT, pol, exogs, endos)
     end
 end
 
-function HetAgentJacCache(b::HetBlock, nT::Int)
+#= function HetAgentJacCache(b::HetBlock, nT::Int)
     # Check whether steady state has been found
     b.ssstatus[].solved ||
         error("must find the steady state for HetBlock before computing Jacobians")
@@ -161,6 +179,50 @@ function HetAgentJacCache(b::HetBlock, nT::Int)
     return HetAgentJacCache{typeof(ha),typeof(fxs),typeof(dcache),TF,M,N}(
         ha, hass, nT, epsilon, fxs, df, dcache, dEVs, dYs, dDs, Es, Js)
 end
+
+=#
+
+function HetAgentJacCache(b::HetBlock, nT::Int)
+    # Check whether steady state has been found
+    b.ssstatus[].solved ||
+        error("must find the steady state for HetBlock before computing Jacobians")
+    ha = deepcopy(b.ha)
+    hass = b.ha
+    D = getdist(ha)
+    TF = eltype(D)
+    ssize = size(D)
+    N = ndims(D)
+    M = N + 1
+    O = M + 1
+    Vs = valuevars(ha)
+    pols = policies(ha)
+    fxs = (Vs..., pols...)
+    df = Array{TF,M}(undef, ssize..., length(fxs))
+    df_big = Dict{Int,Array{TF,M}}()
+    fdtype = b.diffargs[].twosided ? Val(:central) : Val(:forward)
+    epsilon = b.diffargs[].epsilon
+    dcache = GradientCache(df, one(TF), fdtype)
+
+    dEVs = [Array{TF,N}(undef, ssize...) for _ in 1:length(Vs)]
+    dYs = Dict{Int,Matrix{TF}}()
+    dDs = Dict{Int,Array{TF,M}}()
+    Es = Dict{Int,Array{TF,M}}()
+    exogs = exogprocs(ha)
+    endos = endoprocs(ha)
+    if nT > 1
+        Etemp = similar(D)
+        for (i, n) in enumerate(pols)
+            E = Array{TF,M}(undef, ssize..., nT-1)
+            Es[i] = E
+            pol = pols[i]
+            _expectation_vector!(E, Etemp, nT, pol, exogs, endos)
+        end
+    end
+    Js = Dict{Int,Dict{Int,Matrix{TF}}}()
+    return HetAgentJacCache{typeof(ha),typeof(fxs),typeof(dcache),TF,M,N,O}(
+        ha, hass, nT, epsilon, fxs, df, df_big, dcache, dEVs, dYs, dDs, Es, Js)
+end
+
 
 function _setEV!(ev::AbstractArray, evss::AbstractArray, dev::AbstractArray, x::Real)
     @simd for i in eachindex(ev)
@@ -210,15 +272,36 @@ function _jacobian!(b::HetBlock, ca::HetAgentJacCache, ::Val{i}, nT::Int, varval
     val = varvals[ins[i]]
     finite_difference_gradient!(ca.df, f1!, val, ca.dcache, absstep=ca.epsilon)
 
-    exogs = exogprocs(ha)
+    # there goes a line that copies things to the big matrix
+    #copyto!(vfxs[k], ca.fxs[k])
+    # or maybe in _setjacobian
+    #dY = haskey(ca.dYs, i) ? ca.dYs[i] : (ca.dYs[i] = Matrix{TF}(undef, nT, npol))
+    Dss = getdist(hass)
+    TF = eltype(Dss)
+    npol = length(policies(ha))
+    N = ndims(Dss)
+    M = N + 1
+    O = M + 1
+
+    ssize_df_vec =collect(size(ca.df))
+    ssize_df_vec[M] = npol
+    ssize_df = ntuple(k->ssize_df_vec[k], M)
+    
+    df_big = haskey(ca.df_big, i) ? ca.df_big[i] : (ca.df_big[i] = Array{TF,O}(undef, ssize_df..., nT))
+    dfs    = splitdimsview(df_big,(M,O))
+    
     nV = length(valuevars(ha))
+    @inbounds for k in 1:npol
+        copyto!(dfs[k,1], splitdimsview(ca.df)[k+nV])
+    end
+    exogs = exogprocs(ha)
+   
     Vs = splitdimsview(ca.df)
     for k in 1:nV
         backward!(ca.dEVs[k], Vs[k], exogs...)
     end
 
-    Dss = getdist(hass)
-    TF = eltype(Dss)
+
     ssize = size(Dss)
     _dD() = valtype(ca.dDs)(undef, ssize..., nT)
     dD = get!(_dD, ca.dDs, i)
@@ -229,14 +312,17 @@ function _jacobian!(b::HetBlock, ca::HetAgentJacCache, ::Val{i}, nT::Int, varval
     das = ntuple(k->Vs[k+nV], length(endos))
     forward_shock!(dDs[1], Dss, endos..., das...)
 
-    npol = length(policies(ha))
+
     dY = haskey(ca.dYs, i) ? ca.dYs[i] : (ca.dYs[i] = Matrix{TF}(undef, nT, npol))
+    
     vDss = view(Dss, :)
     vas = ntuple(k->view(Vs[k+nV],:), npol)
+
     strvDss = stride1(vDss)
     @inbounds for o in eachindex(vas)
         va = vas[o]
         dY[1,o] = BLAS.dot(length(vDss), vDss, strvDss, va, stride1(va))
+        df_big[]
     end
 
     xsss = map(k->getfield(varvals, k), inputs(b))
@@ -255,6 +341,9 @@ function _jacobian!(b::HetBlock, ca::HetAgentJacCache, ::Val{i}, nT::Int, varval
         z = zero(TF)
         for t in 2:nT
             finite_difference_gradient!(ca.df, f!, z, ca.dcache)
+            @inbounds for k in 1:npol
+                copyto!(dfs[k,t], splitdimsview(ca.df)[k+nV])
+            end
             for k in 1:nV
                 backward!(ca.dEVs[k], Vs[k], exogs...)
             end
@@ -268,6 +357,88 @@ function _jacobian!(b::HetBlock, ca::HetAgentJacCache, ::Val{i}, nT::Int, varval
 
     _setJ!(ca, i, npol)
 end
+
+#=
+function _jacobian!(b::HetBlock, ca::HetAgentJacCache, ::Val{i}, nT::Int, varvals,
+    evs, evsss) where i
+
+ins = inputs(b)
+ha = ca.ha
+hass = ca.hass
+
+function f1!(fx, x)
+    vfxs = splitdimsview(fx)
+    xs = (map(k->getfield(varvals, k), ins[1:i-1])..., x,
+        map(k->getfield(varvals, k), ins[i+1:length(ins)])...)
+    backward_endo!(ha, expectedvalues(ha)..., xs...)
+    for k in eachindex(ca.fxs)
+        @inbounds copyto!(vfxs[k], ca.fxs[k])
+    end
+end
+
+val = varvals[ins[i]]
+finite_difference_gradient!(ca.df, f1!, val, ca.dcache, absstep=ca.epsilon)
+
+exogs = exogprocs(ha)
+nV = length(valuevars(ha))
+Vs = splitdimsview(ca.df)
+for k in 1:nV
+    backward!(ca.dEVs[k], Vs[k], exogs...)
+end
+
+Dss = getdist(hass)
+TF = eltype(Dss)
+ssize = size(Dss)
+_dD() = valtype(ca.dDs)(undef, ssize..., nT)
+dD = get!(_dD, ca.dDs, i)
+dDs = splitdimsview(dD)
+
+# Assume policies associated with endogenous states are placed in the front
+endos = endoprocs(ha)
+das = ntuple(k->Vs[k+nV], length(endos))
+forward_shock!(dDs[1], Dss, endos..., das...)
+
+npol = length(policies(ha))
+dY = haskey(ca.dYs, i) ? ca.dYs[i] : (ca.dYs[i] = Matrix{TF}(undef, nT, npol))
+vDss = view(Dss, :)
+vas = ntuple(k->view(Vs[k+nV],:), npol)
+strvDss = stride1(vDss)
+@inbounds for o in eachindex(vas)
+    va = vas[o]
+    dY[1,o] = BLAS.dot(length(vDss), vDss, strvDss, va, stride1(va))
+end
+
+xsss = map(k->getfield(varvals, k), inputs(b))
+function f!(fx, x)
+    vfxs = splitdimsview(fx)
+    @inbounds for k in 1:nV
+        _setEV!(evs[k], evsss[k], ca.dEVs[k], x)
+    end
+    backward_endo!(ha, evs..., xsss...)
+    @inbounds for k in eachindex(ca.fxs)
+        copyto!(vfxs[k], ca.fxs[k])
+    end
+end
+
+if nT > 1
+    z = zero(TF)
+    for t in 2:nT
+        finite_difference_gradient!(ca.df, f!, z, ca.dcache)
+        for k in 1:nV
+            backward!(ca.dEVs[k], Vs[k], exogs...)
+        end
+        forward_shock!(dDs[t], Dss, endos..., das...)
+        @inbounds for o in eachindex(vas)
+            va = vas[o]
+            dY[t,o] = BLAS.dot(length(vDss), vDss, strvDss, va, stride1(va))
+        end
+    end
+end
+
+_setJ!(ca, i, npol)
+end
+
+=#
 
 jacbyinput(::HetBlock) = true
 
